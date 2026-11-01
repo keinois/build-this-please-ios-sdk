@@ -1,6 +1,6 @@
 # BuildThisPlease SDK
 
-BuildThisPlease is a hosted feature-request board for iOS and Android apps. This public Swift package provides the iOS client, localized SwiftUI interface, App Attest integration, tests, privacy manifest, and a tiny example app. Android integration uses the separate [Android SDK](https://github.com/rosday/BuildThisPleaseAndroidSDK). The Worker, administrator dashboard, database, production configuration, and customer data remain private.
+BuildThisPlease is a hosted feature-request board for iOS and Android apps. This public Swift package provides the iOS client, localized SwiftUI interface, App Attest integration, tests, privacy manifest, and a tiny example app. Android integration uses the separate [Android SDK](https://github.com/keinois/build-this-please-android-sdk). The Worker, administrator dashboard, database, production configuration, and customer data remain private.
 
 ## What app users can do
 
@@ -61,7 +61,7 @@ The publishable project key and API URL identify the mobile project; they are no
 In Xcode, choose **File → Add Package Dependencies…** and use:
 
 ```text
-https://github.com/rosday/BuildThisPleaseSDK
+https://github.com/keinois/build-this-please-ios-sdk
 ```
 
 Select the `BuildThisPlease` product and a tagged version such as `0.1.5` or newer. Because the package is public, developers and Xcode Cloud do not need access to the private backend repository.
