@@ -4,7 +4,7 @@ This guide covers the path from developer signup to a verified production releas
 
 ## Supported platforms
 
-BuildThisPlease supports iOS and Android through separate native SDKs. This guide covers the Swift SDK; use the [Android SDK](https://github.com/rosday/BuildThisPleaseAndroidSDK) for Android integration.
+BuildThisPlease supports iOS and Android through separate native SDKs. This guide covers the Swift SDK; use the [Android SDK](https://github.com/keinois/build-this-please-android-sdk) for Android integration.
 
 The minimum supported iOS version is iOS 18, as confirmed by Rodrigo on October 20, 2026. The Swift package and example deployment settings enforce this minimum; see the [requirements](../README.md#requirements).
 
