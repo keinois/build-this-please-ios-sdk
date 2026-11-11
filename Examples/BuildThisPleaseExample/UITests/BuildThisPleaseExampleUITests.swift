@@ -18,4 +18,23 @@ final class BuildThisPleaseExampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Implemented release notes"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'votes'")).firstMatch.exists)
     }
+    func testCompletionInboxAndPreferences() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        let feedback = app.buttons["Feature requests"]
+        XCTAssertTrue(feedback.waitForExistence(timeout: 10))
+        feedback.tap()
+        let updates = app.buttons["Updates"].firstMatch
+        XCTAssertTrue(updates.waitForExistence(timeout: 5))
+        updates.tap()
+        XCTAssertTrue(app.navigationBars["Updates"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Implemented release notes"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Email me when requests ship"].exists)
+        XCTAssertTrue(app.switches["Local notifications"].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Completion inbox and preferences"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
 }

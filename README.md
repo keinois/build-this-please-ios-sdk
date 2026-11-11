@@ -62,7 +62,7 @@ In Xcode, choose **File → Add Package Dependencies…** and use:
 https://github.com/rosday/BuildThisPleaseSDK
 ```
 
-Select the `BuildThisPlease` product and a tagged version such as `0.1.4` or newer. Because the package is public, developers and Xcode Cloud do not need access to the private backend repository.
+Select the `BuildThisPlease` product and a tagged version such as `0.2.0` or newer. Because the package is public, developers and Xcode Cloud do not need access to the private backend repository.
 
 ## 3. Enable App Attest
 
@@ -188,3 +188,11 @@ For troubleshooting, CI, direct API usage, and an expanded launch checklist, see
 This repository intentionally contains only client-side code. Its example app is not included in the Swift package products and does not ship inside host applications. The private BuildThisPlease backend contains dashboard authorization, application-level tenant isolation, database migrations, deployment configuration, and production infrastructure.
 
 Each submitted request includes the host app version as private backend metadata. The version is captured from the SDK configuration (which defaults to the host app version) and is not included in public request responses.
+
+## Completion updates (0.2.0)
+
+The board now includes an Updates inbox and optional verified completion emails through Cloudflare. See [Notifications integration](Documentation/Notifications.md) for unread badges, optional local alerts, background scheduling, app links and verified identity recovery. Each request starts with a permanent author vote, independent of its follow/mute preference.
+
+## Request caching and launch preloading (0.2.0)
+
+Retain the client when the host app starts and call `try await feedbackClient.preloadRequests()` from an app-owned task without blocking launch. The board reads disk-backed Requests, Mine and Implemented before refreshing each list independently, and keeps saved results visible offline. Preloading and initial board loads reuse complete snapshots for 60 seconds and share in-flight downloads; pull to refresh always fetches fresh data. See [Request caching and host lifecycle](Documentation/RequestCaching.md) for launch, foreground, logout and account-switch examples.

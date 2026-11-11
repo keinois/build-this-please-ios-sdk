@@ -20,6 +20,7 @@ public struct BuildThisPleaseBoard: View {
 /// The embeddable feedback destination. Put this view inside a host app's
 /// `NavigationLink`, menu, settings screen, tab, or sheet.
 public struct BuildThisPleaseFeedbackView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.buildThisPleaseTheme) private var theme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var model: BoardModel
@@ -51,6 +52,12 @@ public struct BuildThisPleaseFeedbackView: View {
         .navigationTitle(String(localized: "Feature requests", bundle: .module))
         .buildThisPleaseInlineTitle()
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button { model.presentsUpdates = true } label: {
+                    Label(String(localized: "Updates", bundle: .module), systemImage: model.unreadCount > 0 ? "bell.badge" : "bell")
+                }
+                .accessibilityValue(Text(model.unreadCount, format: .number))
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button {
                     model.presentsCreate = true
@@ -59,16 +66,21 @@ public struct BuildThisPleaseFeedbackView: View {
                 }
             }
         }
-        .task { await model.load() }
+        .task(id: scenePhase) { if scenePhase == .active { await model.becameActive() } }
+        .sheet(isPresented: $model.presentsUpdates, onDismiss: { Task { await model.refreshUnread() } }) {
+            NavigationStack { BuildThisPleaseUpdatesView(client: model.client) }
+        }
         .buildThisPleasePretranslate((model.currentTickets + model.requests + model.mine + model.implemented).translationTextGroups)
         .sheet(isPresented: $model.presentsCreate) {
-            CreateTicketView(client: model.client) { ticket in
+            CreateTicketView(client: model.client, onEmailError: { model.errorMessage = $0 }) { ticket in
                 model.created(ticket)
                 model.presentsCreate = false
             }
         }
         .navigationDestination(item: $model.selectedTicket) { ticket in
-            TicketDetailView(client: model.client, ticket: ticket, onTicketUpdated: model.replace)
+            TicketDetailView(client: model.client, ticket: ticket) { updated in
+                model.replace(updated, replacingID: ticket.id)
+            }
         }
         .tint(theme.accent)
     }
@@ -105,9 +117,9 @@ private struct TicketCollection: View {
 
     var body: some View {
         Group {
-            if DebugOptions.forceLoadingSkeleton || (model.isLoading && model.currentTickets.isEmpty) {
+            if DebugOptions.forceLoadingSkeleton || (model.isLoading && !model.hasLoadedCurrentSection && model.currentTickets.isEmpty) {
                 TicketListSkeleton()
-            } else if let error = model.errorMessage, model.currentTickets.isEmpty {
+            } else if let error = model.errorMessage, model.currentTickets.isEmpty, !model.hasLoadedCurrentSection {
                 ContentUnavailableView {
                     Label(String(localized: "Couldn’t load requests", bundle: .module), systemImage: "wifi.exclamationmark")
                 } description: {
@@ -118,8 +130,13 @@ private struct TicketCollection: View {
                     }
                 }
             } else if model.currentTickets.isEmpty {
-                EmptySection(section: model.selectedSection) {
-                    model.presentsCreate = true
+                VStack {
+                    if let error = model.errorMessage { ErrorBanner(message: error) { model.errorMessage = nil } }
+                    EmptySection(section: model.selectedSection) { model.presentsCreate = true }
+                    Button(String(localized: "Try again", bundle: .module), systemImage: "arrow.clockwise") {
+                        Task { await model.refreshCurrentSection() }
+                    }
+                    .padding(.bottom)
                 }
             } else {
                 ScrollView {
@@ -408,8 +425,8 @@ private struct FeedbackTicketCard: View {
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .disabled(isVoting)
-            .accessibilityLabel(ticket.hasVoted == true ? String(localized: "Remove vote", bundle: .module) : String(localized: "Vote for this request", bundle: .module))
+            .disabled(isVoting || ticket.voteLocked == true)
+            .accessibilityLabel(ticket.voteLocked == true ? String(localized: "Author vote (permanent)", bundle: .module) : ticket.hasVoted == true ? String(localized: "Remove vote", bundle: .module) : String(localized: "Vote for this request", bundle: .module))
             .accessibilityValue(Text(ticket.voteCount ?? 0, format: .number))
         } else {
             Image(systemName: "person.crop.circle")

@@ -5,9 +5,14 @@ struct CreateTicketView: View {
     @Environment(\.dismiss) private var dismiss
     let client: any BuildThisPleaseClientProtocol
     let onCreated: (BuildThisPleaseTicket) -> Void
+    let onEmailError: (String) -> Void
+    init(client: any BuildThisPleaseClientProtocol, onEmailError: @escaping (String) -> Void = { _ in }, onCreated: @escaping (BuildThisPleaseTicket) -> Void) {
+        self.client = client; self.onEmailError = onEmailError; self.onCreated = onCreated
+    }
     @State private var title = ""
     @State private var description = ""
     @State private var email = ""
+    @State private var emailUpdates = false
     @State private var isSubmitting = false
     @State private var errorMessage: String?
     @State private var idempotencyKey = UUID().uuidString
@@ -46,7 +51,13 @@ struct CreateTicketView: View {
 
                     RequestEmailField(email: $email)
                         .focused($focusedField, equals: .email)
+                        .onChange(of: email) { _, _ in
+                            if email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isEmailValid { emailUpdates = false }
+                        }
 
+                    Toggle(String(localized: "Email me when followed requests ship", bundle: .module), isOn: $emailUpdates)
+                        .disabled(email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isEmailValid)
+                    if emailUpdates { Text(String(localized: "Confirm the email we send to enable updates for requests you follow.", bundle: .module)).font(.footnote).foregroundStyle(.secondary) }
                     if let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                             .font(.callout)
@@ -145,6 +156,10 @@ struct CreateTicketView: View {
                     email: email.trimmingCharacters(in: .whitespacesAndNewlines),
                     idempotencyKey: idempotencyKey
                 )
+                if emailUpdates {
+                    do { _ = try await client.updateNotificationPreferences(email: email.trimmingCharacters(in: .whitespacesAndNewlines), emailEnabled: true, localNotificationsEnabled: nil) }
+                    catch { onEmailError(String(localized: "Your request was saved. Open Updates to retry email setup.", bundle: .module)) }
+                }
                 onCreated(ticket)
             } catch {
                 errorMessage = error.localizedDescription

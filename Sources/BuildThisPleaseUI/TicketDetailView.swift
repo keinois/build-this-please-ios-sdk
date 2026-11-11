@@ -62,6 +62,14 @@ struct TicketDetailView: View {
         .buildThisPleaseInlineTitle()
         .refreshable { await model.load() }
         .task { await model.load() }
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    Task { await model.toggleFollowing() }
+                } label: { Label(model.isFollowing == true ? String(localized: "Stop updates", bundle: .module) : String(localized: "Follow request", bundle: .module), systemImage: model.isFollowing == true ? "bell.slash" : "bell") }
+                .disabled(model.isFollowing == nil || model.isChangingFollow || model.isVoting || model.isLoading)
+            }
+        }
         .buildThisPleasePretranslate(
             [ticketTexts]
                 + model.comments.compactMap { comment in
@@ -178,8 +186,8 @@ private struct TicketDetailSummary: View {
                     .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .disabled(isVoting)
-                .accessibilityLabel(ticket.hasVoted == true ? String(localized: "Remove vote", bundle: .module) : String(localized: "Vote for this request", bundle: .module))
+                .disabled(isVoting || ticket.voteLocked == true)
+                .accessibilityLabel(ticket.voteLocked == true ? String(localized: "Author vote (permanent)", bundle: .module) : ticket.hasVoted == true ? String(localized: "Remove vote", bundle: .module) : String(localized: "Vote for this request", bundle: .module))
                 .accessibilityValue(Text(ticket.voteCount ?? 0, format: .number))
             } else if ticket.status == .implemented {
                 Image(systemName: "checkmark.seal.fill")

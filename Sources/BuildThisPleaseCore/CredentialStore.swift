@@ -32,11 +32,20 @@ public final class KeychainBuildThisPleaseCredentialStore: BuildThisPleaseCreden
 
     public func set(_ value: String, for key: String) async throws {
         #if canImport(Security)
-        try await removeValue(for: key)
-        var query = baseQuery(key)
-        query[kSecValueData as String] = Data(value.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else { throw BuildThisPleaseError.invalidResponse }
+        let data = Data(value.utf8)
+        let query = baseQuery(key)
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecSuccess { return }
+        guard status == errSecItemNotFound else { throw BuildThisPleaseError.invalidResponse }
+        var insertion = query
+        insertion[kSecValueData as String] = data
+        insertion[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let inserted = SecItemAdd(insertion as CFDictionary, nil)
+        // Another client may have inserted between update and add; update that
+        // item without deleting either the old or new credential.
+        if inserted == errSecDuplicateItem {
+            guard SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecSuccess else { throw BuildThisPleaseError.invalidResponse }
+        } else if inserted != errSecSuccess { throw BuildThisPleaseError.invalidResponse }
         #endif
     }
 

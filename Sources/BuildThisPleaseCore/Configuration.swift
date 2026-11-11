@@ -29,6 +29,7 @@ public struct BuildThisPleaseConfiguration: Sendable {
     public var subscriptionStatus: BuildThisPleaseSubscriptionStatus
     public var revenueCatAppUserID: String?
     public var userEmail: String?
+    public let identityNamespace: String?
     public let bundleIdentifier: String
     public let appVersion: String?
     public let osVersion: String
@@ -39,6 +40,7 @@ public struct BuildThisPleaseConfiguration: Sendable {
         subscriptionStatus: BuildThisPleaseSubscriptionStatus = .unknown,
         revenueCatAppUserID: String? = nil,
         userEmail: String? = nil,
+        identityNamespace: String? = nil,
         bundleIdentifier: String? = Bundle.main.bundleIdentifier,
         appVersion: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
         osVersion: String = ProcessInfo.processInfo.operatingSystemVersionString
@@ -57,6 +59,7 @@ public struct BuildThisPleaseConfiguration: Sendable {
         self.environment = environment
         self.subscriptionStatus = subscriptionStatus
         self.revenueCatAppUserID = Self.normalizedOptional(revenueCatAppUserID)
+        self.identityNamespace = Self.normalizedOptional(identityNamespace)
         self.userEmail = Self.normalizedOptional(userEmail)?.lowercased()
         self.bundleIdentifier = bundleIdentifier
         self.appVersion = appVersion

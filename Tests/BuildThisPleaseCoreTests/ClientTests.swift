@@ -142,11 +142,13 @@ struct ClientTests {
         #expect(await transport.paths == [
             "/v1/attestation/recovery/challenges",
             "/v1/attestation/recoveries",
+            "/v1/attestation/assertions/challenges",
+            "/v1/installations/recovery-credential",
             "/v1/tickets?limit=100"
         ])
     }
 
-    @Test("Local development replaces a stale App Attest key after invalid recovery")
+    @Test("A rejected recovery preserves the existing identity, including local development")
     func replacesStaleLocalAttestationKey() async throws {
         let projectKey = "btp_pk_local_recovery_fixture"
         let credentials = InMemoryBuildThisPleaseCredentialStore()
@@ -166,14 +168,11 @@ struct ClientTests {
             attestationProvider: LocalRecoveryFallbackAttestationProvider()
         )
 
-        #expect(try await client.requests().isEmpty)
-        #expect(await credentials.value(for: keyCredential) == "replacement-app-attest-key-identifier")
+        await #expect(throws: BuildThisPleaseError.self) { try await client.requests() }
+        #expect(await credentials.value(for: keyCredential) == "stale-app-attest-key-identifier")
         #expect(await transport.paths == [
             "/v1/attestation/recovery/challenges",
-            "/v1/attestation/recoveries",
-            "/v1/attestation/challenges",
-            "/v1/attestation/registrations",
-            "/v1/tickets?limit=100"
+            "/v1/attestation/recoveries"
         ])
     }
 
@@ -278,8 +277,10 @@ private actor RecoveryTransport: BuildThisPleaseTransport {
         paths.append(path)
         let body: String
         switch request.url!.path {
-        case "/v1/attestation/recovery/challenges":
+        case "/v1/attestation/recovery/challenges", "/v1/attestation/assertions/challenges":
             body = #"{"challengeId":"00000000-0000-4000-8000-000000000001","challengeHash":"fixture-challenge-hash","requestHash":"fixture-request-hash"}"#
+        case "/v1/installations/recovery-credential":
+            body = #"{"installationId":"00000000-0000-4000-8000-000000000002"}"#
         case "/v1/attestation/recoveries":
             body = #"{"installationId":"00000000-0000-4000-8000-000000000002","sessionToken":"recovered-session-token","expiresAt":"2099-01-01T00:00:00Z"}"#
         default:

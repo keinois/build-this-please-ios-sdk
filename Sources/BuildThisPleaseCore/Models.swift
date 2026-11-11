@@ -42,6 +42,7 @@ public struct BuildThisPleaseTicket: Codable, Identifiable, Hashable, Sendable {
     public let canonicalTicketId: String?
     public let voteCount: Int?
     public let hasVoted: Bool?
+    public let voteLocked: Bool?
 
     public init(
         id: String,
@@ -56,7 +57,8 @@ public struct BuildThisPleaseTicket: Codable, Identifiable, Hashable, Sendable {
         implementationNote: String? = nil,
         canonicalTicketId: String? = nil,
         voteCount: Int? = nil,
-        hasVoted: Bool? = nil
+        hasVoted: Bool? = nil,
+        voteLocked: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -71,6 +73,7 @@ public struct BuildThisPleaseTicket: Codable, Identifiable, Hashable, Sendable {
         self.canonicalTicketId = canonicalTicketId
         self.voteCount = voteCount
         self.hasVoted = hasVoted
+        self.voteLocked = voteLocked
     }
 }
 

@@ -110,6 +110,10 @@ Create one `BuildThisPleaseClient` per project and retain it in the app dependen
 
 Initial configuration can include subscription state, RevenueCat App User ID, optional support email, and automatically detected app metadata. Call `updateSubscriptionStatus(_:)` after a subscription transition. Call `updateUserIdentity(revenueCatAppUserID:email:)` after RevenueCat login/alias changes or when the known support email changes. These values are support metadata; BuildThisPlease does not require an end-user account.
 
+## Request caching and launch preloading
+
+Retain the client early and start `preloadRequests()` in a retained host task at launch and on foreground entry. The SDK initializer does not perform network requests. The board restores cached lists before independently refreshing missing or stale sections; force refresh remains available for empty and populated lists. Use an opaque account-specific `identityNamespace`, cancel host tasks and await `clearRequestCache()` before replacing an account's client or completing logout. Changing optional support metadata is not an account transition. See [Request caching](RequestCaching.md) for compilable lifecycle examples, freshness, storage limits and cancellation behavior.
+
 ## SwiftUI integration choices
 
 - `BuildThisPlease.FeedbackListView(client:)`: destination inside the host app's navigation.
@@ -152,3 +156,47 @@ The Release workflow should:
 Project CSV export is useful for ticket-level reporting. Workspace JSON export contains the workspace's projects, members, identifiers, notification recipients, installations, tickets, comments, votes, merges, and audit events.
 
 Workspace deletion is permanent and cascades through all owned projects and feedback. Only an owner can perform it, and the exact workspace name is required. Export and verify the downloaded data before deletion.
+
+## Recovery when an App Attest key becomes unusable
+
+The client retains the existing installation identity, requests, comments and votes.
+Native DeviceCheck errors 2 or 3 while generating an assertion trigger a bounded
+key replacement, not a new installation registration. Replacement requires a full
+Apple attestation and either a saved installation recovery credential or a
+previous session accepted by the server's restricted legacy recovery bridge.
+Missing, rejected or malformed identity proof fails closed and retains local
+credentials; RevenueCat IDs and email addresses do not authorize recovery.
+
+The SDK enrolls a random 256-bit recovery credential through an existing,
+assertion-authenticated session. Only its SHA-256 hash is sent during enrollment
+and new registration. Keychain stores this credential under the existing project
+and identity namespace. The credential is never a publishable project key or user identity.
+
+Replacement state is persisted before network requests or active credential
+changes. It includes the original installation, old proof, replacement key,
+replacement recovery credential, operation ID, and challenge/attestation progress.
+The server atomically replaces the key on the same installation. A lost completion
+response can be retried using the same saved operation and proof without creating
+another installation. Pending state is removed only after all replacement
+credentials are durable. Session establishment, recovery and assertion-authenticated mutations are
+serialized per retained client to prevent mixed key/session pairs and assertion
+counter reordering. Request-list GET downloads share that session coordination,
+then run independently so a slow endpoint does not block the other lists.
+
+Apple's `serverUnavailable` error during attestation preserves the same key and
+client data hash for a later retry. A completed attestation object is persisted
+before submitting it, avoiding a second attestation of the same key. Recovery
+does not clear drafts, request data, votes, host-app data, or change any UI layout.
+
+Initial registration also retains challenge expiry and attestation progress. After
+an expired challenge, the SDK first checks whether that key already registered
+and recovers that installation if so. It restarts an initial registration only
+after an explicit unregistered-key response and only when no active identity
+credentials exist. A network error preserves the pending key and proof.
+
+Recovery of an interrupted initial registration does not assume that the server
+stored its recovery hash merely because the App Attest key exists. The SDK saves
+its active key, session, and recovery candidate with `enrolled=false`, then
+confirms enrollment using a full assertion before returning business data. If
+confirmation fails, that flag and the complete active identity remain durable
+for retry.

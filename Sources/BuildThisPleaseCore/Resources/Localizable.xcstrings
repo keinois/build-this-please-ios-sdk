@@ -3248,6 +3248,17 @@
         }
       },
       "comment": "Network error shown when the device appears to have no internet connection."
+    },
+    "A request you follow is ready": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A request you follow is ready"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

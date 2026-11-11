@@ -5,6 +5,11 @@ public enum MockBuildThisPleaseScenario: String, CaseIterable, Sendable {
 }
 
 public actor MockBuildThisPleaseClient: BuildThisPleaseClientProtocol {
+    private var mockPreferences = BuildThisPleaseNotificationPreferences()
+    private var mockUpdates = [BuildThisPleaseNotification(id: "completion-implemented", ticketId: "implemented", title: "Implemented release notes", implementationNote: "Requests you follow now have completion updates.", appVersion: "1.0")]
+    private var mutedTickets: Set<String> = []
+    private var followedTickets: Set<String> = []
+    private var ownedTickets: Set<String> = []
     private var allTickets: [BuildThisPleaseTicket]
     private var commentsByTicket: [String: [BuildThisPleaseComment]]
     private let scenario: MockBuildThisPleaseScenario
@@ -18,6 +23,7 @@ public actor MockBuildThisPleaseClient: BuildThisPleaseClientProtocol {
     ) {
         self.allTickets = scenario == .empty ? [] : tickets
         self.commentsByTicket = scenario == .empty ? [:] : comments
+        self.followedTickets = Set(self.allTickets.filter { $0.hasVoted == true }.map(\.id))
         self.scenario = scenario
         self.subscriptionStatus = subscriptionStatus
     }
@@ -46,8 +52,8 @@ public actor MockBuildThisPleaseClient: BuildThisPleaseClientProtocol {
     }
     public func comments(ticketId: String) async throws -> [BuildThisPleaseComment] { try await prepare(); return commentsByTicket[ticketId] ?? [] }
     public func createTicket(title: String, description: String, idempotencyKey: String) async throws -> BuildThisPleaseTicket { try await createTicket(title: title, description: description, email: nil, idempotencyKey: idempotencyKey) }
-    public func createTicket(title: String, description: String, email: String?, idempotencyKey: String) async throws -> BuildThisPleaseTicket { try await prepare(); let value = BuildThisPleaseTicket(id: UUID().uuidString, title: title, description: description, status: .pending); allTickets.insert(value, at: 0); return value }
-    public func setVote(ticketId: String, voted: Bool) async throws -> BuildThisPleaseTicket { try await prepare(); guard let index = allTickets.firstIndex(where: { $0.id == ticketId }) else { throw BuildThisPleaseError.invalidResponse }; let old = allTickets[index]; let value = BuildThisPleaseTicket(id: old.id, title: old.title, description: old.description, status: old.status, commentsLocked: old.commentsLocked, createdAt: old.createdAt, updatedAt: .now, implementedAt: old.implementedAt, implementedAppVersion: old.implementedAppVersion, implementationNote: old.implementationNote, voteCount: max(0, (old.voteCount ?? 0) + (voted ? 1 : -1)), hasVoted: voted); allTickets[index] = value; return value }
+    public func createTicket(title: String, description: String, email: String?, idempotencyKey: String) async throws -> BuildThisPleaseTicket { try await prepare(); let value = BuildThisPleaseTicket(id: UUID().uuidString, title: title, description: description, status: .pending, voteCount: 1, hasVoted: true, voteLocked: true); ownedTickets.insert(value.id); followedTickets.insert(value.id); allTickets.insert(value, at: 0); return value }
+    public func setVote(ticketId: String, voted: Bool) async throws -> BuildThisPleaseTicket { try await prepare(); guard let index = allTickets.firstIndex(where: { $0.id == ticketId }) else { throw BuildThisPleaseError.invalidResponse }; let old = allTickets[index]; if old.voteLocked == true { throw BuildThisPleaseError.server(code: "author_vote_permanent", message: "The author’s first vote is permanent.", status: 409) }; let value = BuildThisPleaseTicket(id: old.id, title: old.title, description: old.description, status: old.status, commentsLocked: old.commentsLocked, createdAt: old.createdAt, updatedAt: .now, implementedAt: old.implementedAt, implementedAppVersion: old.implementedAppVersion, implementationNote: old.implementationNote, voteCount: max(0, (old.voteCount ?? 0) + (voted ? 1 : -1)), hasVoted: voted); allTickets[index] = value; if voted && !mutedTickets.contains(ticketId) { followedTickets.insert(ticketId) }; return value }
     public func createComment(ticketId: String, body: String, idempotencyKey: String) async throws -> BuildThisPleaseComment { try await prepare(); let value = BuildThisPleaseComment(id: UUID().uuidString, ticketId: ticketId, author: .user, body: body, isEdited: false, isHidden: false, isApproved: false, isMine: true, createdAt: .now, updatedAt: .now); commentsByTicket[ticketId, default: []].append(value); return value }
     public func updateComment(ticketId: String, commentId: String, body: String) async throws -> BuildThisPleaseComment {
         try await prepare()
@@ -60,6 +66,26 @@ public actor MockBuildThisPleaseClient: BuildThisPleaseClientProtocol {
         return updated
     }
     public func updateSubscriptionStatus(_ status: BuildThisPleaseSubscriptionStatus) async throws { try await prepare(); subscriptionStatus = status }
+
+    public func notifications(cursor: String? = nil) async throws -> BuildThisPleaseNotificationPage {
+        try await prepare(); let values: [BuildThisPleaseNotification] = scenario == .empty ? [] : mockUpdates.map { update in
+            var value = update
+            value.following = followedTickets.contains(update.ticketId)
+            return value
+        }
+        return .init(items: values, unreadCount: values.filter { $0.readAt == nil }.count, nextCursor: nil)
+    }
+    public func markNotificationsRead(ids: [String]) async throws { try await prepare(); for index in mockUpdates.indices where ids.contains(mockUpdates[index].id) { mockUpdates[index].readAt = .now } }
+    public func notificationPreferences() async throws -> BuildThisPleaseNotificationPreferences { try await prepare(); return mockPreferences }
+    public func updateNotificationPreferences(email: String?, emailEnabled: Bool?, localNotificationsEnabled: Bool?) async throws -> BuildThisPleaseNotificationPreferences {
+        try await prepare()
+        if let email { mockPreferences.email=email }
+        if let emailEnabled { mockPreferences.emailEnabled=emailEnabled; mockPreferences.emailVerified=emailEnabled; mockPreferences.verificationPending=false }
+        if let localNotificationsEnabled { mockPreferences.localNotificationsEnabled=localNotificationsEnabled }
+        return mockPreferences
+    }
+    public func following(ticketId: String) async throws -> Bool { try await prepare(); return followedTickets.contains(ticketId) }
+    public func setFollowing(ticketId: String, following: Bool) async throws { try await prepare(); if following { mutedTickets.remove(ticketId); followedTickets.insert(ticketId) } else { mutedTickets.insert(ticketId); followedTickets.remove(ticketId) } }
 
     private func prepare() async throws {
         switch scenario {
