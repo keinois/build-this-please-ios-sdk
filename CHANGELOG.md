@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.2.0 (unreleased, paused)
 
 - Disk-backed Requests, Mine and Implemented snapshots with independent cache-first loading and offline retention.
 - Explicit host launch/foreground preloading, 60-second freshness and shared in-flight list requests.

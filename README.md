@@ -1,5 +1,8 @@
 # BuildThisPlease SDK
 
+> This branch prepares SDK 0.2.0 (paused). It has no published release tag or artifact yet; test using the local checkout.
+
+
 BuildThisPlease is a hosted feature-request board for iOS and Android apps. This public Swift package provides the iOS client, localized SwiftUI interface, App Attest integration, tests, privacy manifest, and a tiny example app. Android integration uses the separate [Android SDK](https://github.com/keinois/build-this-please-android-sdk). The Worker, administrator dashboard, database, production configuration, and customer data remain private.
 
 ## What app users can do
