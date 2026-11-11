@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.6 (unreleased)
+## 0.1.6
 
 - Preload Requests, Mine and Implemented from host-owned launch and foreground tasks.
 - Show disk-backed snapshots immediately, refresh each list independently, and preserve available content offline.
