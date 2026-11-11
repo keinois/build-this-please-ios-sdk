@@ -40,7 +40,8 @@ Never bypass the setup draft by creating a project with another tool. Never infe
 
 ## Integration rules
 
-- Add `https://github.com/rosday/BuildThisPleaseSDK` using a semantic version tag.
+- Follow the iOS 18 minimum support policy enforced by the package and example deployment settings; see [Requirements](README.md#requirements).
+- Add `https://github.com/keinois/build-this-please-ios-sdk` using a semantic version tag.
 - Prefer the aggregate `BuildThisPlease` product unless the app intentionally needs only Core or UI.
 - Create one long-lived `BuildThisPleaseClient` per project. Never instantiate it in `body` or on every navigation.
 - Use `BuildThisPlease.FeedbackListView(client:)` inside an existing `NavigationStack`.
@@ -79,3 +80,9 @@ xcodebuild \
 For host-app integration, also build the affected Debug scheme. When a connected test device is available and the user requests it, install and launch it there. A successful Simulator build does not verify App Attest.
 
 Before declaring production readiness, confirm the checklist in `Documentation/Integration.md` and test the live flow on a physical device.
+
+Issue reporting is open to public contributors through this repository's GitHub Issues. Describe the SDK version, platform, reproduction steps, expected and actual behavior, and sanitized logs; omit credentials and private customer or company material. A local draft containing those details is sufficient when GitHub access is unavailable.
+
+Authorized maintainers with existing private app Brain access follow the [app-owned checklist](https://github.com/keinois/build-this-please-brain/blob/main/Workflows/Development.md#create-and-maintain-issues) for Project membership, assignment, Status, Version and saved-field verification. Public contributors do not need private Brain access and are not responsible for maintaining those fields. Maintainers handle that triage; do not copy private checklist content into public issues or expand access. Routine SDK builds and integration work can proceed without private Project maintenance. Existing technical and action-specific approval instructions still apply.
+
+When you work on a ticket and Rodrigo asks for a PR or a merge into main (or something similar), also update the ticket: follow the app-owned [PR and merge step](https://github.com/keinois/build-this-please-brain/blob/main/Workflows/Development.md#pr-and-merge) (`Closes #n`, issue comment with the PR and verification, Status to review; on merge Done, Version and closing note, #7 dates, read-back).

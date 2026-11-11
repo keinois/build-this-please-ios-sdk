@@ -2,6 +2,14 @@
 
 This guide covers the path from developer signup to a verified production release.
 
+## Supported platforms
+
+BuildThisPlease supports iOS and Android through separate native SDKs. This guide covers the Swift SDK; use the [Android SDK](https://github.com/keinois/build-this-please-android-sdk) for Android integration.
+
+The minimum supported iOS version is iOS 18, as confirmed by Rodrigo on October 20, 2026. The Swift package and example deployment settings enforce this minimum; see the [requirements](../README.md#requirements).
+
+Workspace tenancy is an existing technical capability. A future commercial or public SaaS offering and its pricing remain undecided; the account/workspace flows below do not establish a decision to sell the service.
+
 ## Account and workspace lifecycle
 
 ### New customer
