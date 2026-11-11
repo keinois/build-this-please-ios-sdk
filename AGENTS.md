@@ -47,6 +47,9 @@ Never bypass the setup draft by creating a project with another tool. Never infe
 - Use `BuildThisPlease.FeedbackListView(client:)` inside an existing `NavigationStack`.
 - Use `BuildThisPlease.StandaloneFeedbackView(client:)` only when the destination needs its own navigation stack.
 - Match the host app's architecture and dependency injection; do not introduce a global singleton only for this SDK.
+- Retain the client early at app composition and start `preloadRequests()` in an app-owned task at launch and on foreground entry without blocking launch; constructing a client does not preload automatically.
+- For account-based hosts, use a stable opaque `identityNamespace` per account and a separate anonymous namespace. Close old feedback UI, cancel host tasks, await the old client's `clearRequestCache()`, then replace the retained client on logout/account switch. Support email and RevenueCat metadata are not cache identity. Follow [RequestCaching.md](Documentation/RequestCaching.md).
+- Keep explicit pull-to-refresh network-fresh; do not add automatic push/background polling claims or copy the example harness into hosts.
 - Use `MockBuildThisPleaseClient` in previews, UI tests, and Simulator-only workflows.
 - Debug physical-device builds normally use a `development` entitlement and `.staging(baseURL: productionURL)`.
 - Release/TestFlight builds must use a `production` entitlement and `.production(baseURL: productionURL)`.

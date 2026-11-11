@@ -2,6 +2,9 @@ import Foundation
 
 public protocol BuildThisPleaseClientProtocol: Sendable {
     func configuration() async throws -> BuildThisPleaseConfigurationResponse
+    func cachedRequests() async -> BuildThisPleaseRequestSnapshot?
+    func preloadRequests() async throws
+    func clearRequestCache() async
     func requests() async throws -> [BuildThisPleaseTicket]
     func myRequests() async throws -> [BuildThisPleaseTicket]
     func implementedRequests() async throws -> [BuildThisPleaseTicket]
@@ -16,6 +19,20 @@ public protocol BuildThisPleaseClientProtocol: Sendable {
 }
 
 public extension BuildThisPleaseClientProtocol {
+    func cachedRequests() async -> BuildThisPleaseRequestSnapshot? { nil }
+    func clearRequestCache() async {}
+    func preloadRequests() async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { _ = try await self.requests() }
+            group.addTask { _ = try await self.myRequests() }
+            group.addTask { _ = try await self.implementedRequests() }
+            // Wait for every list, including successes after another list fails.
+            var firstError: (any Error)?
+            while let result = await group.nextResult() { if case .failure(let error) = result, firstError == nil { firstError = error } }
+            if let firstError { throw firstError }
+        }
+    }
+
     func createTicket(title: String, description: String, email: String?, idempotencyKey: String) async throws -> BuildThisPleaseTicket {
         try await createTicket(title: title, description: description, idempotencyKey: idempotencyKey)
     }
@@ -72,9 +89,28 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
     private let attestation: any BuildThisPleaseAttestationProvider
     private let credentialPrefix: String
     private var memorySession: Session?
-    // Actor methods reenter at awaits; queue complete authenticated operations so a
+    private let requestCacheDisk: RequestCacheDiskStore
+    private let requestCacheScope: String
+    private var requestSnapshot: BuildThisPleaseRequestSnapshot?
+    private var requestCacheKey: String?
+    private var cacheRestored = false
+    private var cacheGeneration = 0
+    private var cacheClearGeneration = 0
+    private var requestRevision = 0
+    private var cachedTicketChanges: [String: (revision: Int, ticket: BuildThisPleaseTicket, replacedIDs: Set<String>, preservesMine: Bool)] = [:]
+    private var requestFlights: [RequestList: (id: UUID, task: Task<[BuildThisPleaseTicket], Error>)] = [:]
+    // Queue session establishment/recovery and complete mutation operations so a
     // mutation never pairs an old session with a replacement key or reorders counters.
+    // Request-list downloads use a session acquired here, then release the queue.
     private var operationTail: Task<Void, Never>?
+    // Internal gates let concurrency tests hold publication independently of transport.
+    struct RequestCacheTestHooks: Sendable {
+        let didQueueOperation: @Sendable () -> Void
+        let didCompleteOperation: @Sendable () -> Void
+        let beforePublishingTicket: @Sendable (BuildThisPleaseTicket) async -> Void
+    }
+    private var requestCacheTestHooks: RequestCacheTestHooks?
+    func setRequestCacheTestHooks(_ hooks: RequestCacheTestHooks?) { requestCacheTestHooks = hooks }
 
     private struct RecoveryCredential: Codable, Sendable {
         let token: String
@@ -127,37 +163,200 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
         configuration: BuildThisPleaseConfiguration,
         transport: any BuildThisPleaseTransport = URLSessionBuildThisPleaseTransport(),
         credentialStore: any BuildThisPleaseCredentialStore = KeychainBuildThisPleaseCredentialStore(),
-        attestationProvider: any BuildThisPleaseAttestationProvider = DeviceCheckAttestationProvider()
+        attestationProvider: any BuildThisPleaseAttestationProvider = DeviceCheckAttestationProvider(),
+        requestCacheDirectory: URL? = nil
     ) {
         self.config = configuration
         self.transport = transport
         self.credentials = credentialStore
         self.attestation = attestationProvider
-        self.credentialPrefix = sha256(Data(configuration.projectKey.utf8)).base64URLEncodedString.prefix(16).description
+        self.requestCacheDisk = requestCacheDirectory.map { RequestCacheDiskStore(directory: $0) } ?? .shared
+        let environment: String
+        switch configuration.environment { case .production: environment = "production"; case .staging: environment = "staging"; case .local: environment = "local" }
+        self.requestCacheScope = [configuration.environment.baseURL.absoluteString, environment, configuration.projectKey, configuration.bundleIdentifier, configuration.identityNamespace ?? ""].joined(separator: "\n")
+        self.credentialPrefix = sha256(Data((configuration.projectKey + (configuration.identityNamespace.map { "\n" + $0 } ?? "")).utf8)).base64URLEncodedString.prefix(16).description
     }
 
     public func configuration() async throws -> BuildThisPleaseConfigurationResponse {
         try await get("/v1/config")
     }
 
-    public func requests() async throws -> [BuildThisPleaseTicket] {
-        let page: BuildThisPleasePage<BuildThisPleaseTicket> = try await get("/v1/tickets?limit=100")
-        return page.items
+    /// Reads local saved requests without establishing a session or making a network request.
+    public func cachedRequests() async -> BuildThisPleaseRequestSnapshot? {
+        await restoreRequestCache()
+        requestSnapshot = requestSnapshot?.unexpired()
+        return requestSnapshot
     }
 
-    public func myRequests() async throws -> [BuildThisPleaseTicket] {
-        let page: BuildThisPleasePage<BuildThisPleaseTicket> = try await get("/v1/me/tickets?limit=100")
-        return page.items
+    /// Refreshes missing or older-than-one-minute lists. Call from a retained host app task.
+    public func preloadRequests() async throws {
+        let snapshot = await cachedRequests()
+        try Task.checkCancellation()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for section in RequestList.allCases where snapshot?.list(section)?.isFresh() != true {
+                group.addTask { _ = try await self.requestList(section) }
+            }
+            var firstError: (any Error)?
+            while let result = await group.nextResult() {
+                if case .failure(let error) = result, firstError == nil { firstError = error }
+            }
+            try Task.checkCancellation()
+            if let firstError { throw firstError }
+        }
     }
 
-    public func implementedRequests() async throws -> [BuildThisPleaseTicket] {
-        let page: BuildThisPleasePage<BuildThisPleaseTicket> = try await get("/v1/implemented?limit=100")
-        return page.items
+    /// Clear at logout after cancelling host tasks, before replacing an account-scoped client.
+    public func clearRequestCache() async {
+        cacheGeneration += 1
+        cacheClearGeneration += 1
+        requestRevision += 1
+        requestSnapshot = nil
+        cachedTicketChanges.removeAll()
+        cacheRestored = true
+        let flights = requestFlights.values.map(\.task)
+        requestFlights.removeAll()
+        flights.forEach { $0.cancel() }
+        // Remove all installation snapshots in this account scope, even if Keychain
+        // is temporarily unavailable or this client has never restored its cache.
+        await requestCacheDisk.removeScope(prefix: requestCacheScopePrefix)
+    }
+
+    public func requests() async throws -> [BuildThisPleaseTicket] { try await requestList(.requests) }
+    public func myRequests() async throws -> [BuildThisPleaseTicket] { try await requestList(.mine) }
+    public func implementedRequests() async throws -> [BuildThisPleaseTicket] { try await requestList(.implemented) }
+
+    private func savedRequestCacheKey() async -> String? {
+        if let memorySession { return cacheKey(installationID: memorySession.installationId) }
+        guard let session: Session = try? await readCredential(sessionCredential) else { return nil }
+        return cacheKey(installationID: session.installationId)
+    }
+
+    private var requestCacheScopePrefix: String { sha256(Data(requestCacheScope.utf8)).base64URLEncodedString }
+
+    private func cacheKey(installationID: String) -> String {
+        requestCacheScopePrefix + "-" + sha256(Data(installationID.utf8)).base64URLEncodedString
+    }
+
+    private func restoreRequestCache() async {
+        guard !cacheRestored else { return }
+        let generation = cacheGeneration
+        let key = await savedRequestCacheKey()
+        let saved = if let key { await requestCacheDisk.read(key: key) } else { nil as BuildThisPleaseRequestSnapshot? }
+        guard generation == cacheGeneration, !cacheRestored else { return }
+        requestCacheKey = key
+        requestSnapshot = saved
+        cacheRestored = true
+    }
+
+    private func requestList(_ section: RequestList) async throws -> [BuildThisPleaseTicket] {
+        try Task.checkCancellation()
+        await restoreRequestCache()
+        try Task.checkCancellation()
+        let flight: (id: UUID, task: Task<[BuildThisPleaseTicket], Error>)
+        if let existing = requestFlights[section] { flight = existing }
+        else {
+            let generation = cacheGeneration
+            let revision = requestRevision
+            let id = UUID()
+            // This finite shared operation belongs to the client, not its first UI waiter.
+            // Cancelling a screen must not cancel launch preloading; clear cancels all flights.
+            let clearGeneration = cacheClearGeneration
+            let task = Task { try await self.fetchRequestList(section, generation: generation, revision: revision, clearGeneration: clearGeneration) }
+            flight = (id, task)
+            requestFlights[section] = flight
+        }
+        do {
+            let items = try await flight.task.value
+            if requestFlights[section]?.id == flight.id { requestFlights[section] = nil }
+            try Task.checkCancellation()
+            return items
+        } catch {
+            if requestFlights[section]?.id == flight.id { requestFlights[section] = nil }
+            throw error
+        }
+    }
+
+    private func fetchRequestList(_ section: RequestList, generation: Int, revision: Int, clearGeneration: Int, mayRetryIdentityChange: Bool = true) async throws -> [BuildThisPleaseTicket] {
+        let page = try await getRequestList(section.path)
+        try Task.checkCancellation()
+        guard clearGeneration == cacheClearGeneration else { throw CancellationError() }
+        if generation != cacheGeneration {
+            // Establishing a genuinely different installation clears old viewer state.
+            // Retry its authorized list once; explicit logout clearing never retries.
+            guard mayRetryIdentityChange else { throw CancellationError() }
+            return try await fetchRequestList(section, generation: cacheGeneration, revision: requestRevision, clearGeneration: clearGeneration, mayRetryIdentityChange: false)
+        }
+        // Preserve newer local writes while still accepting server additions and removals.
+        var items = page.items
+        for change in cachedTicketChanges.values.sorted(by: { $0.revision < $1.revision }) where change.revision > revision {
+            items = merging(change.ticket, replacing: change.replacedIDs, into: items, section: section, preservesMine: change.preservesMine)
+        }
+        requestSnapshot = (requestSnapshot ?? .init()).replacing(section, with: .init(items: items, updatedAt: .now))
+        await persistRequestCache()
+        guard generation == cacheGeneration else { throw CancellationError() }
+        return requestSnapshot?.list(section)?.items ?? page.items
+    }
+
+    private func persistRequestCache() async {
+        guard let snapshot = requestSnapshot, let session = memorySession else { return }
+        let key = cacheKey(installationID: session.installationId)
+        requestCacheKey = key
+        await requestCacheDisk.write(snapshot, key: key)
+    }
+
+    private func merging(_ ticket: BuildThisPleaseTicket, replacing ids: Set<String>, into items: [BuildThisPleaseTicket], section: RequestList, preservesMine: Bool) -> [BuildThisPleaseTicket] {
+        let wasPresent = items.contains { matches($0, ids: ids) }
+        var result = items.filter { !matches($0, ids: ids) }
+        let belongs: Bool = switch section {
+        case .requests: [.inReview, .planned, .inProgress].contains(ticket.status)
+        case .implemented: ticket.status == .implemented
+        case .mine: wasPresent || preservesMine
+        }
+        if belongs { result.insert(ticket, at: 0) }
+        return result
+    }
+
+    private func matches(_ ticket: BuildThisPleaseTicket, ids: Set<String>) -> Bool {
+        ids.contains(ticket.id) || ticket.canonicalTicketId.map(ids.contains) == true
+    }
+
+    private func cacheTicket(_ ticket: BuildThisPleaseTicket, replacingID: String? = nil, created: Bool = false, generation: Int) async {
+        await requestCacheTestHooks?.beforePublishingTicket(ticket)
+        guard generation == cacheGeneration else { return }
+        // Detail(S) can return C without an alias in C's wire representation.
+        // Retain the requested identity, including earlier S -> C -> D changes,
+        // so an older list cannot restore any of those source rows.
+        var replacedIDs: Set<String> = [ticket.id]
+        if let replacingID { replacedIDs.insert(replacingID) }
+        for change in cachedTicketChanges.values where !change.replacedIDs.isDisjoint(with: replacedIDs) {
+            replacedIDs.formUnion(change.replacedIDs)
+        }
+        let preservesMine = created || requestSnapshot?.mine?.items.contains { matches($0, ids: replacedIDs) } == true
+        cachedTicketChanges = cachedTicketChanges.filter { $0.value.replacedIDs.isDisjoint(with: replacedIDs) }
+        requestRevision += 1
+        cachedTicketChanges[ticket.id] = (requestRevision, ticket, replacedIDs, preservesMine)
+        var snapshot = requestSnapshot ?? .init()
+        for section in RequestList.allCases {
+            guard let list = snapshot.list(section) else { continue }
+            let items = merging(ticket, replacing: replacedIDs, into: list.items, section: section, preservesMine: preservesMine)
+            snapshot = snapshot.replacing(section, with: .init(items: items, updatedAt: list.updatedAt, isComplete: list.isComplete))
+        }
+        if created && snapshot.mine == nil { snapshot = snapshot.replacing(.mine, with: .init(items: [ticket], updatedAt: .now, isComplete: false)) }
+        requestSnapshot = snapshot
+        await persistRequestCache()
     }
 
     public func ticket(id: String) async throws -> BuildThisPleaseTicket {
-        let envelope: TicketEnvelope = try await get("/v1/tickets/\(id)")
-        return envelope.ticket
+        await restoreRequestCache()
+        let generation = cacheGeneration
+        return try await serialized { client in
+            let revision = client.requestRevision
+            let envelope: TicketEnvelope = try await client.getAuthenticated("/v1/tickets/\(id)")
+            guard generation == client.cacheGeneration else { throw CancellationError() }
+            if let newer = client.cachedTicketChanges.values.first(where: { $0.replacedIDs.contains(id) && $0.revision > revision }) { return newer.ticket }
+            await client.cacheTicket(envelope.ticket, replacingID: id, generation: generation)
+            return envelope.ticket
+        }
     }
 
     public func comments(ticketId: String) async throws -> [BuildThisPleaseComment] {
@@ -170,13 +369,26 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
     }
 
     public func createTicket(title: String, description: String, email: String?, idempotencyKey: String = UUID().uuidString) async throws -> BuildThisPleaseTicket {
-        let envelope: TicketEnvelope = try await mutate("POST", path: "/v1/tickets", body: TicketBody(title: title, description: description, email: Self.normalizedOptional(email)?.lowercased(), appVersion: Self.normalizedOptional(config.appVersion)), idempotencyKey: idempotencyKey)
-        return envelope.ticket
+        await restoreRequestCache()
+        let generation = cacheGeneration
+        let body = TicketBody(title: title, description: description, email: Self.normalizedOptional(email)?.lowercased(), appVersion: Self.normalizedOptional(config.appVersion))
+        return try await mutateTicket("POST", path: "/v1/tickets", bodyData: try JSONCoding.encoder().encode(body), idempotencyKey: idempotencyKey, created: true, generation: generation)
     }
 
     public func setVote(ticketId: String, voted: Bool) async throws -> BuildThisPleaseTicket {
-        let envelope: TicketEnvelope = try await mutate(voted ? "PUT" : "DELETE", path: "/v1/tickets/\(ticketId)/vote", bodyData: Data())
-        return envelope.ticket
+        await restoreRequestCache()
+        let generation = cacheGeneration
+        return try await mutateTicket(voted ? "PUT" : "DELETE", path: "/v1/tickets/\(ticketId)/vote", bodyData: Data(), replacingID: ticketId, generation: generation)
+    }
+
+    private func mutateTicket(_ method: String, path: String, bodyData: Data, idempotencyKey: String? = nil, replacingID: String? = nil, created: Bool = false, generation: Int) async throws -> BuildThisPleaseTicket {
+        try await serialized { client in
+            let envelope: TicketEnvelope = try await client.mutateAuthenticated(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey)
+            // Publish before releasing the queue, so a later response cannot be
+            // overwritten by an earlier caller resuming after task completion.
+            await client.cacheTicket(envelope.ticket, replacingID: replacingID, created: created, generation: generation)
+            return envelope.ticket
+        }
     }
 
     public func createComment(ticketId: String, body: String, idempotencyKey: String = UUID().uuidString) async throws -> BuildThisPleaseComment {
@@ -203,16 +415,23 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
         config.userEmail = normalizedEmail
     }
 
+    /// Returns the current anonymous installation identifier.
+    public func installationIdentifier() async throws -> String {
+        try await serialized { client in try await client.validSession().installationId }
+    }
     private func serialized<Response: Sendable>(
         _ operation: @escaping @Sendable (isolated BuildThisPleaseClient) async throws -> Response
     ) async throws -> Response {
         let previous = operationTail
+        let hooks = requestCacheTestHooks
         let task = Task {
             if let previous { await previous.value }
             try Task.checkCancellation()
+            defer { hooks?.didCompleteOperation() }
             return try await operation(self)
         }
         operationTail = Task { _ = try? await task.value }
+        hooks?.didQueueOperation()
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
@@ -221,14 +440,40 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
     }
 
     private func get<Response: Decodable & Sendable>(_ path: String) async throws -> Response {
+        try await serialized { client in try await client.getAuthenticated(path) }
+    }
+
+    private func getAuthenticated<Response: Decodable & Sendable>(_ path: String) async throws -> Response {
+        do {
+            let session = try await validSession()
+            return try await perform("GET", path: path, bodyData: nil, token: session.token)
+        } catch where Self.isInvalidSession(error) {
+            let session = try await validSession(forceRefresh: true)
+            return try await perform("GET", path: path, bodyData: nil, token: session.token)
+        }
+    }
+
+    /// List GETs need a session token but no App Attest assertion. Serialize only
+    /// session work, allowing unrelated lists to publish while one endpoint is slow.
+    private func getRequestList(_ path: String) async throws -> BuildThisPleasePage<BuildThisPleaseTicket> {
+        let session = try await requestListSession()
+        try Task.checkCancellation()
+        do {
+            return try await perform("GET", path: path, bodyData: nil, token: session.token)
+        } catch where Self.isInvalidSession(error) {
+            let refreshed = try await requestListSession(replacingRejectedToken: session.token)
+            try Task.checkCancellation()
+            return try await perform("GET", path: path, bodyData: nil, token: refreshed.token)
+        }
+    }
+
+    private func requestListSession(replacingRejectedToken rejectedToken: String? = nil) async throws -> Session {
         try await serialized { client in
-            do {
-                let session = try await client.validSession()
-                return try await client.perform("GET", path: path, bodyData: nil, token: session.token)
-            } catch where Self.isInvalidSession(error) {
-                let session = try await client.validSession(forceRefresh: true)
-                return try await client.perform("GET", path: path, bodyData: nil, token: session.token)
-            }
+            let current = try await client.validSession()
+            // Another GET or mutation may already have recovered this rejected token.
+            // Reuse that session instead of repeatedly invalidating parallel retries.
+            guard let rejectedToken, current.token == rejectedToken else { return current }
+            return try await client.validSession(forceRefresh: true)
         }
     }
 
@@ -238,22 +483,26 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
 
     private func mutate<Response: Decodable & Sendable>(_ method: String, path: String, bodyData: Data, idempotencyKey: String? = nil) async throws -> Response {
         try await serialized { client in
-            var session: Session?
-            do {
-                let established = try await client.validSession()
-                session = established
-                return try await client.mutateOnce(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey, session: established)
-            } catch {
-                if Self.isInvalidSession(error) {
-                    let refreshed = try await client.validSession(forceRefresh: true)
-                    return try await client.mutateOnce(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey, session: refreshed)
-                }
-                // The only automatic key replacement trigger is a native assertion
-                // failure, before the business request has been sent.
-                guard Self.isInvalidAssertionKey(error) else { throw error }
-                let replacement = try await client.replaceKey(existingSession: session)
-                return try await client.mutateOnce(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey, session: replacement)
+            try await client.mutateAuthenticated(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey)
+        }
+    }
+
+    private func mutateAuthenticated<Response: Decodable & Sendable>(_ method: String, path: String, bodyData: Data, idempotencyKey: String? = nil) async throws -> Response {
+        var session: Session?
+        do {
+            let established = try await validSession()
+            session = established
+            return try await mutateOnce(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey, session: established)
+        } catch {
+            if Self.isInvalidSession(error) {
+                let refreshed = try await validSession(forceRefresh: true)
+                return try await mutateOnce(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey, session: refreshed)
             }
+            // The only automatic key replacement trigger is a native assertion
+            // failure, before the business request has been sent.
+            guard Self.isInvalidAssertionKey(error) else { throw error }
+            let replacement = try await replaceKey(existingSession: session)
+            return try await mutateOnce(method, path: path, bodyData: bodyData, idempotencyKey: idempotencyKey, session: replacement)
         }
     }
 
@@ -293,8 +542,19 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
             return try await resumeReplacement(pending)
         }
         if let pending: PendingRegistration = try await readCredential(pendingRegistrationCredential) {
-            let session = try await resumeRegistration(pending)
-            return try await ensureRecoveryCredential(session)
+            do {
+                let session = try await resumeRegistration(pending)
+                return try await ensureRecoveryCredential(session)
+            } catch {
+                // A failed final deletion can leave a completed registration here.
+                // Replace a lost native key only when every committed credential
+                // still matches that registration and its saved recovery proof.
+                // A lost acknowledgement can leave enrolled=false; the backend
+                // still validates the saved session or fallback token on replacement.
+                guard Self.isInvalidAssertionKey(error),
+                      let session = try await committedRegistrationSession(pending) else { throw error }
+                return try await replaceKey(existingSession: session)
+            }
         }
         if !forceRefresh, let memorySession, memorySession.expiresAt.timeIntervalSinceNow > 60 {
             return try await ensureRecoveryCredential(memorySession)
@@ -462,6 +722,16 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
         try await credentials.removeValue(for: pendingRegistrationCredential)
     }
 
+    private func committedRegistrationSession(_ pending: PendingRegistration) async throws -> Session? {
+        guard pending.registrationAttempted,
+              try await credentials.value(for: keyIdCredential) == pending.keyId,
+              let session: Session = try await readCredential(sessionCredential),
+              let recovery: RecoveryCredential = try await readCredential(recoveryCredential),
+              recovery.installationId == session.installationId,
+              recovery.token == pending.recoveryToken else { return nil }
+        return session
+    }
+
     private func replaceKey(existingSession: Session?) async throws -> Session {
         if let pending: PendingReplacement = try await readCredential(pendingReplacementCredential) { return try await resumeReplacement(pending) }
         guard let oldKeyId = try await credentials.value(for: keyIdCredential) else { throw BuildThisPleaseError.attestationFailed }
@@ -537,6 +807,13 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
         try await persistSession(session)
         try await credentials.set(pending.newKeyId, for: keyIdCredential)
         try await writeCredential(RecoveryCredential(token: pending.replacementRecoveryToken, installationId: pending.installationId, enrolled: true), key: recoveryCredential)
+        if let registration: PendingRegistration = try await readCredential(pendingRegistrationCredential),
+           registration.registrationAttempted, registration.keyId == pending.oldKeyId,
+           registration.recoveryToken == pending.oldProof || registration.recoveryToken == pending.fallbackProof {
+            // Keep the replacement journal until this matching old registration
+            // is retired too, so a crash or deletion failure can retry cleanup.
+            try await credentials.removeValue(for: pendingRegistrationCredential)
+        }
         try await credentials.removeValue(for: pendingReplacementCredential)
         return session
     }
@@ -560,6 +837,15 @@ public actor BuildThisPleaseClient: BuildThisPleaseClientProtocol {
         return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &random) }).base64URLEncodedString
     }
     private func persistSession(_ session: Session) async throws {
+        let newKey = cacheKey(installationID: session.installationId)
+        if let oldKey = requestCacheKey, oldKey != newKey {
+            cacheGeneration += 1
+            requestRevision += 1
+            requestSnapshot = nil
+            cachedTicketChanges.removeAll()
+            await requestCacheDisk.remove(key: oldKey)
+        }
+        requestCacheKey = newKey
         try await writeCredential(session, key: sessionCredential)
         memorySession = session
     }

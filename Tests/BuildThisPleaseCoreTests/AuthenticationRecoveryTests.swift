@@ -108,10 +108,29 @@ struct AuthenticationRecoveryTests {
         async let implemented = fixture.client.implementedRequests()
         async let first = fixture.client.setVote(ticketId: "ticket", voted: true)
         async let second = fixture.client.setVote(ticketId: "ticket", voted: false)
-        _ = try await (requests, mine, implemented, first, second)
+        async let installationId = fixture.client.installationIdentifier()
+        let (_, _, _, _, _, identity) = try await (requests, mine, implemented, first, second, installationId)
+        #expect(identity == "original-installation")
         #expect(await fixture.transport.replacementCount == 1)
         #expect(await fixture.attestation.maxConcurrentAssertions == 1)
         #expect(await fixture.transport.businessMutationCount == 2)
+    }
+
+    @Test("Recovery preserves the selected identity namespace and leaves other credentials intact")
+    func preservesIdentityNamespace() async throws {
+        let fixture = try await RecoveryFixture.make(identityNamespace: "  account-a  ")
+        let otherPrefix = sha256(Data((fixture.config.projectKey + "\naccount-b").utf8)).base64URLEncodedString.prefix(16).description
+        let legacyPrefix = sha256(Data(fixture.config.projectKey.utf8)).base64URLEncodedString.prefix(16).description
+        try await fixture.credentials.set("other-account-key", for: "\(otherPrefix).appAttestKeyId")
+        try await fixture.credentials.set("legacy-key", for: "\(legacyPrefix).appAttestKeyId")
+        #expect(try await fixture.client.installationIdentifier() == "original-installation")
+        #expect(await fixture.credentials.value(for: fixture.keyName) == "replacement-key")
+        #expect(await fixture.credentials.value(for: fixture.recoveryName)?.contains("original-installation") == true)
+        #expect(await fixture.credentials.value(for: "\(otherPrefix).appAttestKeyId") == "other-account-key")
+        #expect(await fixture.credentials.value(for: "\(legacyPrefix).appAttestKeyId") == "legacy-key")
+        #expect(await fixture.credentials.value(for: "\(otherPrefix).recoveryCredential") == nil)
+        #expect(await fixture.credentials.value(for: "\(legacyPrefix).recoveryCredential") == nil)
+        #expect(await fixture.transport.registrationCount == 0)
     }
 
     @Test("A server-expired session is renewed with the original key before retrying")
@@ -296,6 +315,100 @@ struct AuthenticationRecoveryTests {
         #expect(await fixture.credentials.value(for: fixture.recoveryName)?.contains("\"enrolled\":true") == true)
     }
 
+    @Test("Key replacement retires a matching interrupted registration before completing cleanup", arguments: ["none", "pendingRegistration", "pendingKeyReplacement"])
+    func interruptedRegistrationSurvivesLaterKeyLoss(cleanupFailure: String) async throws {
+        let fixture = try await RecoveryFixture.make(includeSession: false, includeKey: false, rejectOldKey: false)
+        let registrationName = "\(fixture.prefix).pendingRegistration"
+        await fixture.credentials.failNextRemove(for: registrationName)
+        await #expect(throws: BuildThisPleaseError.self) { try await fixture.client.requests() }
+        #expect(await fixture.credentials.value(for: registrationName) != nil)
+        #expect(await fixture.credentials.value(for: fixture.recoveryName)?.contains("\"enrolled\":true") == true)
+        await fixture.attestation.rejectKey("replacement-key")
+
+        if cleanupFailure != "none" {
+            await fixture.credentials.failNextRemove(for: "\(fixture.prefix).\(cleanupFailure)")
+            await #expect(throws: BuildThisPleaseError.self) {
+                try await fixture.newClient().createTicket(title: "Still mine", description: "Retry after cleanup", idempotencyKey: "same-owner")
+            }
+            #expect(await fixture.credentials.value(for: fixture.pendingName) != nil)
+            #expect(await fixture.transport.businessMutationCount == 0)
+            #expect(try await fixture.newClient().requests().isEmpty)
+        }
+        _ = try await fixture.newClient().createTicket(title: "Still mine", description: "Retry after cleanup", idempotencyKey: "same-owner")
+        #expect(try await fixture.newClient().requests().isEmpty)
+        _ = try await fixture.newClient().setVote(ticketId: "ticket", voted: true)
+        #expect(try await fixture.newClient().installationIdentifier() == "original-installation")
+        #expect(await fixture.credentials.value(for: registrationName) == nil)
+        #expect(await fixture.credentials.value(for: fixture.pendingName) == nil)
+        #expect(await fixture.credentials.value(for: fixture.keyName) == "replacement-key-2")
+        #expect(await fixture.transport.registrationCount == 1)
+        #expect(await fixture.attestation.generatedKeyCount == 2)
+        #expect(await fixture.transport.businessMutationCount == 2)
+        #expect(Set(await fixture.transport.completionOperationIds).count == 1)
+    }
+
+    @Test("A read can recover a lost key after an interrupted registration commit")
+    func readRecoversInterruptedRegistration() async throws {
+        let fixture = try await RecoveryFixture.make(includeSession: false, includeKey: false, rejectOldKey: false)
+        let registrationName = "\(fixture.prefix).pendingRegistration"
+        await fixture.credentials.failNextRemove(for: registrationName)
+        await #expect(throws: BuildThisPleaseError.self) { try await fixture.client.requests() }
+        await fixture.attestation.rejectKey("replacement-key")
+        #expect(try await fixture.newClient().requests().isEmpty)
+        #expect(try await fixture.newClient().installationIdentifier() == "original-installation")
+        #expect(await fixture.credentials.value(for: registrationName) == nil)
+        #expect(await fixture.credentials.value(for: fixture.keyName) == "replacement-key-2")
+        #expect(await fixture.transport.registrationCount == 1)
+        #expect(await fixture.transport.replacementCount == 1)
+    }
+
+    @Test("Replacement cleanup preserves a pending registration with a different recovery proof")
+    func replacementPreservesUnrelatedRegistration() async throws {
+        let fixture = try await RecoveryFixture.make(expired: true, durableProof: true)
+        await fixture.transport.setLoseNextCompletion(true)
+        await #expect(throws: URLError.self) { try await fixture.client.requests() }
+        let registrationName = "\(fixture.prefix).pendingRegistration"
+        let unrelated = #"{"keyId":"original-key","recoveryToken":"another-registration-proof","registrationAttempted":true}"#
+        try await fixture.credentials.set(unrelated, for: registrationName)
+        #expect(try await fixture.newClient().requests().isEmpty)
+        #expect(await fixture.credentials.value(for: registrationName) == unrelated)
+        #expect(await fixture.credentials.value(for: fixture.keyName) == "replacement-key")
+        // The inconsistent record remains a conflict rather than being silently ignored.
+        await #expect(throws: BuildThisPleaseError.self) { try await fixture.newClient().requests() }
+        #expect(await fixture.transport.registrationCount == 0)
+    }
+
+    @Test("Interrupted recovered registration can replace a lost key before enrollment acknowledgement", arguments: [false, true])
+    func unacknowledgedRegistrationProofRecovers(requireDurableProof: Bool) async throws {
+        let fixture = try await RecoveryFixture.make(includeSession: false, includeKey: false, rejectOldKey: false)
+        let registrationName = "\(fixture.prefix).pendingRegistration"
+        await fixture.transport.setLoseRegistrationResponse(true)
+        await #expect(throws: URLError.self) { try await fixture.client.requests() }
+        await fixture.credentials.failNextRemove(for: registrationName)
+        await #expect(throws: BuildThisPleaseError.self) { try await fixture.newClient().requests() }
+        #expect(await fixture.credentials.value(for: registrationName) != nil)
+        #expect(await fixture.credentials.value(for: fixture.recoveryName)?.contains("\"enrolled\":false") == true)
+        await fixture.transport.setRequireConfirmedRecoveryProof(requireDurableProof)
+        await fixture.attestation.rejectKey("replacement-key")
+
+        // Exercise read-first recovery after relaunch, including a backend that
+        // requires the saved token because it already accepted registration.
+        #expect(try await fixture.newClient().requests().isEmpty)
+        _ = try await fixture.newClient().createTicket(title: "Same owner", description: "Acknowledgement was interrupted", idempotencyKey: "same-installation")
+        _ = try await fixture.newClient().setVote(ticketId: "ticket", voted: true)
+        #expect(try await fixture.newClient().requests().isEmpty)
+        #expect(try await fixture.newClient().installationIdentifier() == "original-installation")
+        #expect(await fixture.credentials.value(for: registrationName) == nil)
+        #expect(await fixture.credentials.value(for: fixture.pendingName) == nil)
+        #expect(await fixture.credentials.value(for: fixture.keyName) == "replacement-key-2")
+        #expect(await fixture.credentials.value(for: fixture.recoveryName)?.contains("\"enrolled\":true") == true)
+        #expect(await fixture.transport.registrationCount == 1)
+        #expect(await fixture.transport.replacementCount == 1)
+        #expect(await fixture.attestation.generatedKeyCount == 2)
+        #expect(await fixture.transport.businessMutationCount == 2)
+        #expect(await fixture.transport.challengeAuthorizations.count == (requireDurableProof ? 2 : 1))
+    }
+
     @Test("A submitted initial registration cannot overwrite another active key")
     func submittedInitialPreservesDifferentActiveKey() async throws {
         let fixture = try await RecoveryFixture.make(includeSession: false, includeKey: false, rejectOldKey: false)
@@ -330,10 +443,10 @@ private struct RecoveryFixture: Sendable {
     var recoveryName: String { "\(prefix).recoveryCredential" }
     var pendingName: String { "\(prefix).pendingKeyReplacement" }
 
-    static func make(expired: Bool = true, includeSession: Bool = true, includeKey: Bool = true, code: Int = 3, durableProof: Bool = false, rejectOldKey: Bool = true) async throws -> Self {
+    static func make(expired: Bool = true, includeSession: Bool = true, includeKey: Bool = true, code: Int = 3, durableProof: Bool = false, rejectOldKey: Bool = true, identityNamespace: String? = nil) async throws -> Self {
         let projectKey = "btp_pk_replacement_fixture"
-        let config = try BuildThisPleaseConfiguration(projectKey: projectKey, environment: .production(baseURL: URL(string: "https://feedback.example.test")!), bundleIdentifier: "com.example.host")
-        let prefix = sha256(Data(projectKey.utf8)).base64URLEncodedString.prefix(16).description
+        let config = try BuildThisPleaseConfiguration(projectKey: projectKey, environment: .production(baseURL: URL(string: "https://feedback.example.test")!), identityNamespace: identityNamespace, bundleIdentifier: "com.example.host")
+        let prefix = sha256(Data((projectKey + (config.identityNamespace.map { "\n" + $0 } ?? "")).utf8)).base64URLEncodedString.prefix(16).description
         let credentials = RecoveryCredentials()
         if includeKey { try await credentials.set("original-key", for: "\(prefix).appAttestKeyId") }
         if includeSession {
@@ -365,6 +478,7 @@ private actor RecoveryCredentials: BuildThisPleaseCredentialStore {
     private var values: [String: String] = [:]
     private var failedKey: String?
     private var failedValueSubstring: String?
+    private var failedRemovalKey: String?
     func value(for key: String) -> String? { values[key] }
     func set(_ value: String, for key: String) throws {
         if key == failedKey, failedValueSubstring == nil || value.contains(failedValueSubstring!) {
@@ -374,8 +488,15 @@ private actor RecoveryCredentials: BuildThisPleaseCredentialStore {
         }
         values[key] = value
     }
-    func removeValue(for key: String) { values[key] = nil }
+    func removeValue(for key: String) throws {
+        if key == failedRemovalKey {
+            failedRemovalKey = nil
+            throw BuildThisPleaseError.invalidResponse
+        }
+        values[key] = nil
+    }
     func failNextSet(for key: String, containing substring: String? = nil) { failedKey = key; failedValueSubstring = substring }
+    func failNextRemove(for key: String) { failedRemovalKey = key }
 }
 
 private actor RecoveryProvider: BuildThisPleaseAttestationProvider {

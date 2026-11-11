@@ -20,6 +20,7 @@ public struct BuildThisPleaseBoard: View {
 /// The embeddable feedback destination. Put this view inside a host app's
 /// `NavigationLink`, menu, settings screen, tab, or sheet.
 public struct BuildThisPleaseFeedbackView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.buildThisPleaseTheme) private var theme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var model: BoardModel
@@ -59,7 +60,7 @@ public struct BuildThisPleaseFeedbackView: View {
                 }
             }
         }
-        .task { await model.load() }
+        .task(id: scenePhase) { if scenePhase == .active { await model.becameActive() } }
         .buildThisPleasePretranslate((model.currentTickets + model.requests + model.mine + model.implemented).translationTextGroups)
         .sheet(isPresented: $model.presentsCreate) {
             CreateTicketView(client: model.client) { ticket in
@@ -68,7 +69,9 @@ public struct BuildThisPleaseFeedbackView: View {
             }
         }
         .navigationDestination(item: $model.selectedTicket) { ticket in
-            TicketDetailView(client: model.client, ticket: ticket, onTicketUpdated: model.replace)
+            TicketDetailView(client: model.client, ticket: ticket) { updated in
+                model.replace(updated, replacingID: ticket.id)
+            }
         }
         .tint(theme.accent)
     }
@@ -105,9 +108,9 @@ private struct TicketCollection: View {
 
     var body: some View {
         Group {
-            if DebugOptions.forceLoadingSkeleton || (model.isLoading && model.currentTickets.isEmpty) {
+            if DebugOptions.forceLoadingSkeleton || (model.isLoading && !model.hasLoadedCurrentSection && model.currentTickets.isEmpty) {
                 TicketListSkeleton()
-            } else if let error = model.errorMessage, model.currentTickets.isEmpty {
+            } else if let error = model.errorMessage, model.currentTickets.isEmpty, !model.hasLoadedCurrentSection {
                 ContentUnavailableView {
                     Label(String(localized: "Couldn’t load requests", bundle: .module), systemImage: "wifi.exclamationmark")
                 } description: {
@@ -118,8 +121,13 @@ private struct TicketCollection: View {
                     }
                 }
             } else if model.currentTickets.isEmpty {
-                EmptySection(section: model.selectedSection) {
-                    model.presentsCreate = true
+                VStack {
+                    if let error = model.errorMessage { ErrorBanner(message: error) { model.errorMessage = nil } }
+                    EmptySection(section: model.selectedSection) { model.presentsCreate = true }
+                    Button(String(localized: "Try again", bundle: .module), systemImage: "arrow.clockwise") {
+                        Task { await model.refreshCurrentSection() }
+                    }
+                    .padding(.bottom)
                 }
             } else {
                 ScrollView {

@@ -23,6 +23,14 @@ struct ExampleRootView: View {
     @State private var resetToken = UUID()
     @State private var showsDeveloperMenu = false
     @State private var forceDarkMode = false
+    @State private var retainedClient: (any BuildThisPleaseClientProtocol)?
+    @State private var clientRevision = UUID()
+    @State private var foregroundTask: Task<Void, Never>?
+    @Environment(\.scenePhase) private var scenePhase
+    private let fallbackClient = MockBuildThisPleaseClient()
+
+    private var client: any BuildThisPleaseClientProtocol { retainedClient ?? fallbackClient }
+    private var clientIdentity: String { "\(mode.rawValue)-\(scenario.rawValue)-\(subscription.rawValue)-\(resetToken)" }
 
     private var mode: ExampleMode {
         #if DEBUG
@@ -40,7 +48,7 @@ struct ExampleRootView: View {
         false
         #endif
     }
-    private var client: any BuildThisPleaseClientProtocol {
+    private func makeClient() -> any BuildThisPleaseClientProtocol {
         if mode == .mock {
             return MockBuildThisPleaseClient(scenario: scenario, subscriptionStatus: subscription)
         }
@@ -79,6 +87,20 @@ struct ExampleRootView: View {
                 }
             }
         }
+        .id(clientRevision)
+        .task(id: clientIdentity) {
+            let next = makeClient()
+            retainedClient = next
+            clientRevision = UUID()
+            try? await next.preloadRequests()
+        }
+        .onChange(of: scenePhase) {
+            if scenePhase == .active, let retainedClient {
+                foregroundTask?.cancel()
+                foregroundTask = Task { try? await retainedClient.preloadRequests() }
+            }
+        }
+        .onDisappear { foregroundTask?.cancel() }
         .preferredColorScheme(forceDarkMode ? .dark : nil)
         #if DEBUG
         .sheet(isPresented: $showsDeveloperMenu) {

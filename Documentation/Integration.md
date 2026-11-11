@@ -118,6 +118,10 @@ Create one `BuildThisPleaseClient` per project and retain it in the app dependen
 
 Initial configuration can include subscription state, RevenueCat App User ID, optional support email, and automatically detected app metadata. Call `updateSubscriptionStatus(_:)` after a subscription transition. Call `updateUserIdentity(revenueCatAppUserID:email:)` after RevenueCat login/alias changes or when the known support email changes. These values are support metadata; BuildThisPlease does not require an end-user account.
 
+## Request caching and launch preloading
+
+Retain the client early and start `preloadRequests()` in a retained host task at launch and on foreground entry. The SDK initializer does not perform network requests. The board restores cached lists before independently refreshing missing or stale sections; force refresh remains available for empty and populated lists. Use an opaque account-specific `identityNamespace`, cancel host tasks and await `clearRequestCache()` before replacing an account's client or completing logout. Changing optional support metadata is not an account transition. See [Request caching](RequestCaching.md) for compilable lifecycle examples, freshness, storage limits and cancellation behavior.
+
 ## SwiftUI integration choices
 
 - `BuildThisPlease.FeedbackListView(client:)`: destination inside the host app's navigation.
@@ -174,7 +178,7 @@ credentials; RevenueCat IDs and email addresses do not authorize recovery.
 The SDK enrolls a random 256-bit recovery credential through an existing,
 assertion-authenticated session. Only its SHA-256 hash is sent during enrollment
 and new registration. Keychain stores this credential under the existing project
-namespace. The credential is never a publishable project key or user identity.
+and identity namespace. The credential is never a publishable project key or user identity.
 
 Replacement state is persisted before network requests or active credential
 changes. It includes the original installation, old proof, replacement key,
@@ -182,8 +186,10 @@ replacement recovery credential, operation ID, and challenge/attestation progres
 The server atomically replaces the key on the same installation. A lost completion
 response can be retried using the same saved operation and proof without creating
 another installation. Pending state is removed only after all replacement
-credentials are durable. Authenticated operations are serialized per retained
-client to prevent mixed key/session pairs and assertion counter reordering.
+credentials are durable. Session establishment, recovery and assertion-authenticated mutations are
+serialized per retained client to prevent mixed key/session pairs and assertion
+counter reordering. Request-list GET downloads share that session coordination,
+then run independently so a slow endpoint does not block the other lists.
 
 Apple's `serverUnavailable` error during attestation preserves the same key and
 client data hash for a later retry. A completed attestation object is persisted
