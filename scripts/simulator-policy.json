@@ -1,0 +1,31 @@
+{
+  "app": "build-this-please",
+  "version": "0.12.2",
+  "revision": "6518ba7eab1123d7e1d7797b0e05f51043b42a5b",
+  "binary_sha256": "c3ced4f69e1f45e86ec2652c5e70ea5213cf53dcfae446eb8da898cb26d8d170",
+  "all_categories": [
+    "widgets",
+    "siri",
+    "search",
+    "icloud",
+    "store",
+    "pim",
+    "web",
+    "family",
+    "health",
+    "photos",
+    "apps",
+    "messaging",
+    "connectivity",
+    "telemetry",
+    "other"
+  ],
+  "features": {
+    "mock-ui": {
+      "tier": "stock",
+      "categories": [],
+      "reason": "example UI smoke has no verified slim profile yet; use stock"
+    }
+  },
+  "profiles": {}
+}
